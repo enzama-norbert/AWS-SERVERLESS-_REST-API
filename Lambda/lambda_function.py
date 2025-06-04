@@ -1,157 +1,155 @@
-import boto3
 import json
-from custom_encoder import CustomEncoder
-import logging
+import boto3
+from botocore.exceptions import ClientError
+from decimal import Decimal
+from boto3.dynamodb.conditions import Key
+from datetime import datetime
 
+# Initialize the DynamoDB client
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+dynamodb_table = dynamodb.Table('todos')
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+status_check_path = '/status'
+todo_path = '/todo'
+todos_path = '/todos'
 
-#define our dynamodb table
-dynamodbTableName = 'userserverless'
-
-#define our dynamo clients
-dynamodb = boto3.resource('dynamodb')
-
-#define our table
-table = dynamodb.Table(dynamodbTableName)
-
-#define our methods
-getMethod = 'GET'
-postMethod = 'POST'
-putMethod = 'PUT'
-deleteMethod = 'DELETE'
-
-#define our Paths
-healthPath = '/health'
-productPath = '/user'
-productsPath = '/users'
-
-# entry point for our lambda function
 def lambda_handler(event, context):
-    logger.info(event) #log the request event to see how the request looks like
-    httpMethod = event['httpMethod'] #extract the http method from our event object
-    path = event['path'] #extract the path
-    if httpMethod == getMethod and path == healthPath:
-        response = buildResponse(200)
-    elif httpMethod == getMethod and path == productPath:
-        response = getProduct(event['queryStringParameters']['id'])
-    elif httpMethod == getMethod and path == productsPath:
-        response = getProducts()
-    elif httpMethod == postMethod and path == productPath:
-        response = saveProduct(json.loads(event['body']))
-    elif httpMethod == putMethod and path == productPath:
-        requestBody = json.loads(event['body'])
-        response = modifyProduct(requestBody)
-    elif httpMethod == deleteMethod and path == productPath:
-        requestBody = json.loads(event['body'])
-        response = deleteProduct(requestBody['id'])
-    else:
-        response = buildResponse(404, 'Not found')
-    
+    print('Request event: ', event)
+    response = None
+   
+    try:
+        http_method = event.get('httpMethod')
+        path = event.get('path')
 
+        if http_method == 'GET' and path == status_check_path:
+            response = build_response(200, 'Service is operational')
+        elif http_method == 'GET' and path == todo_path:
+            todo_id = event['queryStringParameters']['todoid']
+            response = get_todo(todo_id)
+        elif http_method == 'GET' and path == todos_path:
+            response = get_todos()
+        elif http_method == 'POST' and path == todo_path:
+            response = save_todo(json.loads(event['body']))
+        elif http_method == 'PATCH' and path == todo_path:
+            body = json.loads(event['body'])
+            response = modify_todo(body['todoId'], body['updateKey'], body['updateValue'])
+        elif http_method == 'DELETE' and path == todo_path:
+            body = json.loads(event['body'])
+            response = delete_todo(body['todoId'])
+        else:
+            response = build_response(404, '404 Not Found')
+
+    except Exception as e:
+        print('Error:', e)
+        response = build_response(400, 'Error processing request')
+   
     return response
 
-def getProduct(productId):
+def get_todo(todo_id):
     try:
-        response = table.get_item(
-            Key={
-                'id': productId
-            }
-        )
-        if 'Item' in response:
-            return buildResponse(200, response['Item'])
-        else:
-            return buildResponse(404, {'Message': 'ProductId %s not found' % productId})
-    except:
-        logger.exception('Do your custom error handling here. I am just gonna log it out here')
+        response = dynamodb_table.get_item(Key={'todoid': todo_id})
+        return build_response(200, response.get('Item'))
+    except ClientError as e:
+        print('Error:', e)
+        return build_response(400, e.response['Error']['Message'])
 
-def getProducts():
+def get_todos():
     try:
-        response = table.scan()
-        result = response['Items']
-
-        while 'LastEvaluatedKey' in response:
-            response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
-            result.extend(response['Items'])
-
-        body = {
-            'products': result
+        scan_params = {
+            'TableName': dynamodb_table.name
         }
-        return buildResponse(200, body)
-    except:
-        logger.exception('Do your custom error handling here. I am just gonna log it out here')
+        return build_response(200, scan_dynamo_records(scan_params, []))
+    except ClientError as e:
+        print('Error:', e)
+        return build_response(400, e.response['Error']['Message'])
 
-def saveProduct(requestBody):
+def scan_dynamo_records(scan_params, item_array):
+    response = dynamodb_table.scan(**scan_params)
+    item_array.extend(response.get('Items', []))
+   
+    if 'LastEvaluatedKey' in response:
+        scan_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
+        return scan_dynamo_records(scan_params, item_array)
+    else:
+        return {'todos': item_array}
+
+def save_todo(request_body):
     try:
-        table.put_item(Item=requestBody)
+        # Add timestamp if not provided
+        if 'createdAt' not in request_body:
+            request_body['createdAt'] = datetime.utcnow().isoformat()
+        
+        dynamodb_table.put_item(Item=request_body)
         body = {
             'Operation': 'SAVE',
             'Message': 'SUCCESS',
-            'Item': requestBody
+            'Item': request_body
         }
-        return buildResponse(200, body)
-    except:
-        logger.exception('sorry your item wasnt ')
+        return build_response(200, body)
+    except ClientError as e:
+        print('Error:', e)
+        return build_response(400, e.response['Error']['Message'])
 
-def modifyProduct(event):
-    
+def modify_todo(todo_id, update_key, update_value):
     try:
-        
-        response = table.update_item(
+        # Handle empty description case
+        if update_key == 'description' and update_value == '':
+            update_value = ' '  # DynamoDB doesn't allow empty strings
             
-            
-            Key={
-                'id': event['id']
-            },
-            UpdateExpression='SET fname=:pn, lname= :pnum ,username=:pb, email=:d , avatar= :a',
-            ExpressionAttributeValues={
-                ':pn': event['fname'],
-                ':pnum':event['lname'],
-                ':pb':event['username'],
-                ':d':event['email'],
-                ':a': event['avatar'],
-            },
+        response = dynamodb_table.update_item(
+            Key={'todoid': todo_id},
+            UpdateExpression=f'SET {update_key} = :value',
+            ExpressionAttributeValues={':value': update_value},
             ReturnValues='UPDATED_NEW'
         )
         
-       
+        # If updating description with space, set it back to empty
+        if update_key == 'description' and update_value == ' ':
+            response['Attributes'][update_key] = ''
+        
         body = {
             'Operation': 'UPDATE',
             'Message': 'SUCCESS',
-            'UpdateAttributes': response
+            'UpdatedAttributes': response
         }
-        return buildResponse(200, body)
-    except:
-        logger.exception('Do your custom error handling here. I am just gonna log it out here')
+        return build_response(200, body)
+    except ClientError as e:
+        print('Error:', e)
+        return build_response(400, e.response['Error']['Message'])
 
-def deleteProduct(productId):
+def delete_todo(todo_id):
     try:
-        response = table.delete_item(
-            Key={
-                'id': productId
-            },
+        response = dynamodb_table.delete_item(
+            Key={'todoid': todo_id},
             ReturnValues='ALL_OLD'
         )
         body = {
             'Operation': 'DELETE',
             'Message': 'SUCCESS',
-            'deletedItem': response
+            'Item': response
         }
-        return buildResponse(200, body)
-    except:
-        logger.exception('Do your custom error handling here. I am just gonna log it out here')
+        return build_response(200, body)
+    except ClientError as e:
+        print('Error:', e)
+        return build_response(400, e.response['Error']['Message'])
 
-def buildResponse(statusCode, body=None):
-    response = {
-        'statusCode': statusCode,
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            if obj % 1 == 0:
+                return int(obj)
+            else:
+                return float(obj)
+        return super(DecimalEncoder, self).default(obj)
+
+def build_response(status_code, body):
+    return {
+        'statusCode': status_code,
         'headers': {
+            'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Content-Type': 'application/json'
-            
-        }
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'
+        },
+        'body': json.dumps(body, cls=DecimalEncoder)
     }
-    if body is not None:
-        response['body'] = json.dumps(body, cls=CustomEncoder)
-        
-    return response

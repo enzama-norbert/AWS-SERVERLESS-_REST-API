@@ -1,0 +1,40 @@
+body {
+    background-color: #f8f9fa;
+}
+
+.todo-item {
+    transition: all 0.3s ease;
+    border-left: 4px solid transparent;
+}
+
+.todo-item:hover {
+    background-color: #f8f9fa;
+}
+
+.todo-item.completed {
+    border-left-color: #198754;
+    opacity: 0.8;
+}
+
+.todo-item.completed .todo-title {
+    text-decoration: line-through;
+    color: #6c757d;
+}
+
+.todo-actions .btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.875rem;
+}
+
+.status-badge {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.5rem;
+}
+
+.card {
+    border: none;
+}
+
+#loading-spinner {
+    display: block;
+}
